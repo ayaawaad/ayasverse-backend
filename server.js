@@ -7,6 +7,7 @@ app.use(express.json());
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 app.post("/chat", async (req, res) => {
+console.log("Received /chat request:", JSON.stringify(req.body).slice(0, 200));
   try {
     const { userMessage, closetItems, styleSoul, weather, mood, occasion, conversationHistory } = req.body;
 
