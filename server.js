@@ -1,17 +1,15 @@
 const express = require("express");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { GoogleGenAI } = require("@google/genai");
 
 const app = express();
 app.use(express.json());
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 app.post("/chat", async (req, res) => {
-console.log("Received /chat request:", JSON.stringify(req.body).slice(0, 200));
+  console.log("Received /chat request:", JSON.stringify(req.body).slice(0, 200));
   try {
     const { userMessage, closetItems, styleSoul, weather, mood, occasion, conversationHistory } = req.body;
-
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
     const closetCount = closetItems ? closetItems.length : 0;
     const smallClosetWarning = closetCount < 4
@@ -29,7 +27,7 @@ STRICT RULES:
 - Keep messages short, warm, and conversational.
 
 SMALL CLOSET RULE:
-If there isn't enough clothing to build a complete, sensible outfit, do NOT invent items. Instead, explain kindly what's missing (e.g. "I don't see any shoes in your closet yet") and suggest what to add. Only say this if it's genuinely true - if there's enough clothing, never mention closet size at all.
+If there isn't enough clothing to build a complete, sensible outfit, do NOT invent items. Instead, explain kindly what's missing and suggest what to add. Only say this if it's genuinely true.
 
 OUTFIT RULE:
 When the user wants outfit suggestions, always attempt to create exactly 3 different outfit options using only real closet items. If 3 complete outfits aren't possible, create as many real, complete outfits as you can - never pad with invented items.
@@ -55,29 +53,31 @@ RESPONSE FORMAT - respond ONLY in this exact JSON structure, no extra text befor
   "outfits": [
     {
       "title": "Outfit 1",
-      "reason": "short warm explanation - e.g. matches today's weather, fits your Style Soul, perfect for the occasion",
+      "reason": "short warm explanation",
       "items": ["closetItemId1", "closetItemId2", "closetItemId3"]
     }
   ]
 }
 
-If you are just chatting (not suggesting outfits yet, e.g. asking a follow-up question), set "outfits" to an empty array [].
+If you are just chatting (not suggesting outfits yet), set "outfits" to an empty array [].
 If the closet doesn't have enough items for outfits, set "outfits" to an empty array [] and explain in "reply".
     `;
 
-    const result = await model.generateContent(systemPrompt);
-    const responseText = result.response.text();
+    const result = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: systemPrompt,
+    });
+
+    const responseText = result.text;
     const cleaned = responseText.replace(/```json|```/g, "").trim();
 
     let parsed;
     try {
       parsed = JSON.parse(cleaned);
     } catch (e) {
-      // Fallback if the model didn't return valid JSON
       parsed = { reply: responseText, outfits: [] };
     }
 
-    // Server-side validation: only keep outfits whose item IDs actually exist in the closet
     const validIds = new Set((closetItems || []).map((item) => item.id));
     if (parsed.outfits) {
       parsed.outfits = parsed.outfits
