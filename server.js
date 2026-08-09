@@ -11,7 +11,7 @@ console.log("Received /chat request:", JSON.stringify(req.body).slice(0, 200));
   try {
     const { userMessage, closetItems, styleSoul, weather, mood, occasion, conversationHistory } = req.body;
 
-    const model = genAI.getGenerativeModel({ model: "gemini-3.1-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
     const closetCount = closetItems ? closetItems.length : 0;
     const smallClosetWarning = closetCount < 4
