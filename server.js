@@ -1,6 +1,9 @@
 const express = require("express");
 const { GoogleGenAI } = require("@google/genai");
 
+console.log("API key exists:", !!process.env.GEMINI_API_KEY);
+console.log("API key length:", process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.length : 0);
+
 const app = express();
 app.use(express.json());
 
