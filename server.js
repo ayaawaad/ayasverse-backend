@@ -67,7 +67,7 @@ If the closet doesn't have enough items for outfits, set "outfits" to an empty a
     `;
 
     const result = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-flash-latest",
       contents: systemPrompt,
     });
 
