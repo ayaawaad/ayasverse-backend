@@ -1,5 +1,6 @@
 const express = require("express");
 const { GoogleGenAI } = require("@google/genai");
+const Jimp = require("jimp");
 
 console.log("API key exists:", !!process.env.GEMINI_API_KEY);
 console.log("API key length:", process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.length : 0);
@@ -196,6 +197,19 @@ app.post("/analyze-clothing", async (req, res) => {
       uploadBufferToCloudinary(stickerBuffer, backgroundRemoved ? "sticker.png" : "sticker.jpg"),
     ]);
 
+    // Real perceptual image hash (pHash, via Jimp) for duplicate detection -
+    // this actually looks at the picture itself, not just tags. Hashing the
+    // background-removed sticker when we have one normalizes out background
+    // differences between two photos of the same physical item.
+    let imageHash = null;
+    try {
+      const hashSource = backgroundRemoved ? stickerBuffer : originalBuffer;
+      const jimpImage = await Jimp.read(hashSource);
+      imageHash = jimpImage.hash();
+    } catch (hashError) {
+      console.error("Image hashing skipped:", hashError.message);
+    }
+
     const analysisPrompt = `
 You are analyzing a single clothing item photo for a fashion app's digital closet.
 
@@ -263,6 +277,7 @@ Always pick the closest valid category and type from the lists above, even if im
       originalUrl,
       stickerUrl,
       backgroundRemoved,
+      imageHash,
       ...analysis,
     });
   } catch (error) {
@@ -358,6 +373,145 @@ app.get("/weather", async (req, res) => {
       latitude,
       longitude,
     });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /check-duplicate - real image-based duplicate detection.
+// body: { newHash: string, candidates: [{ id: string, hash: string }] }
+// Compares the new item's perceptual hash against every existing closet
+// item's hash and returns the closest match if it's genuinely close -
+// this looks at what the item actually looks like, not just its tags,
+// so it catches the same physical item even if it got tagged slightly
+// differently across two uploads.
+app.post("/check-duplicate", async (req, res) => {
+  try {
+    const { newHash, candidates } = req.body;
+    if (!newHash || !Array.isArray(candidates)) {
+      return res.status(400).json({ error: "newHash and candidates are required" });
+    }
+
+    let bestMatchId = null;
+    let bestDistance = 1; // Jimp.compareHashes returns 0-1, 0 = identical
+
+    for (const candidate of candidates) {
+      if (!candidate.hash) continue;
+      let distance;
+      try {
+        distance = Jimp.compareHashes(newHash, candidate.hash);
+      } catch (e) {
+        continue; // skip anything that fails to compare (e.g. malformed hash)
+      }
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestMatchId = candidate.id;
+      }
+    }
+
+    // Threshold chosen conservatively below Jimp's own documented ~0.15
+    // cutoff (same image re-saved as PNG vs JPEG) - we want to flag
+    // genuinely-the-same items, not just visually similar ones.
+    const isDuplicate = bestMatchId !== null && bestDistance < 0.1;
+
+    res.json({
+      isDuplicate,
+      matchedId: isDuplicate ? bestMatchId : null,
+      distance: bestDistance,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /recreate-outfit - "Recreate an Outfit" feature.
+// body: { imageBase64: string (the inspiration photo), closetItems: [...], aiName?: string }
+// Sends the inspiration photo + the user's real closet to Gemini in one call,
+// asks it to identify each piece in the photo and match it to a real owned
+// item where possible - and to be upfront (matchType: "substitute" /
+// "not_found") rather than pretending a bad match is a good one.
+app.post("/recreate-outfit", async (req, res) => {
+  console.log("Received /recreate-outfit request");
+  try {
+    const { imageBase64, closetItems, aiName } = req.body;
+    if (!imageBase64) {
+      return res.status(400).json({ error: "imageBase64 is required" });
+    }
+
+    const assistantName = aiName && aiName.trim() ? aiName.trim() : "your AI stylist";
+    const imageBuffer = Buffer.from(imageBase64, "base64");
+
+    const recreatePrompt = `
+You are ${assistantName}, the AI Stylist inside a fashion app called AyasVerse.
+
+The attached photo is an OUTFIT INSPIRATION the user wants to recreate using clothes they actually own. It could be a Pinterest photo, a photo of a friend, a magazine shot - anything.
+
+Look at the photo and identify each distinct clothing piece visible (e.g. "oversized blazer", "white tee", "straight-leg jeans", "white sneakers", "shoulder bag"). For each piece, try to find the closest real match in the user's closet below.
+
+Closet items (use ONLY these ids, never invent one):
+${JSON.stringify(closetItems || [])}
+
+For EACH piece you identify in the photo, return one entry with:
+- "pieceDescription": short description of what's in the photo (e.g. "cream oversized blazer")
+- "matchedItemId": the closet item id that's the closest real match, or null if nothing in the closet works even as a stand-in
+- "matchType": "close_match" (genuinely similar piece), "substitute" (not the same, but a reasonable stand-in), or "not_found" (nothing usable owned)
+- "note": one short, honest, casual sentence. If it's a substitute or not found, say so plainly - don't pretend a stand-in is a perfect match
+
+STRICT RULES:
+- Never invent a closet item id that isn't in the list above.
+- Always prefer a genuine close match over a substitute - only mark "substitute" if there's truly nothing closer.
+- Be direct in "note": e.g. "closest thing you've got is your beige cardigan, not quite the same but works" rather than vague positivity.
+- If NOTHING in the closet works even loosely for a piece, matchedItemId must be null and matchType "not_found" - briefly say what's missing so they know what to add.
+
+Return ONLY this exact JSON structure, no extra text before or after:
+{
+  "summary": "one short, casual overall sentence on how close this recreation gets",
+  "pieces": [
+    { "pieceDescription": "...", "matchedItemId": "..." or null, "matchType": "close_match" | "substitute" | "not_found", "note": "..." }
+  ]
+}
+    `;
+
+    const result = await ai.models.generateContent({
+      model: "gemini-flash-latest",
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { text: recreatePrompt },
+            { inlineData: { mimeType: "image/jpeg", data: imageBuffer.toString("base64") } },
+          ],
+        },
+      ],
+    });
+
+    const responseText = result.text;
+    const cleaned = responseText.replace(/```json|```/g, "").trim();
+
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (e) {
+      parsed = { summary: responseText, pieces: [] };
+    }
+
+    // Server-side validation: strip any hallucinated closet item ids,
+    // same pattern as /chat's outfit validation.
+    const validIds = new Set((closetItems || []).map((item) => item.id));
+    if (Array.isArray(parsed.pieces)) {
+      parsed.pieces = parsed.pieces.map((piece) => {
+        if (piece.matchedItemId && !validIds.has(piece.matchedItemId)) {
+          return { ...piece, matchedItemId: null, matchType: "not_found" };
+        }
+        return piece;
+      });
+    } else {
+      parsed.pieces = [];
+    }
+
+    res.json(parsed);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: error.message });
