@@ -18,9 +18,27 @@ const CLOUDINARY_UPLOAD_PRESET = "ayasverse_closet";
 // Matches lib/widgets/closet/type_selector.dart exactly. Kept in sync
 // manually - if you add a type there, add it here too, or Gemini's answer
 // will get clamped to the first type in its category as a fallback.
+// Keep this in sync with typesByCategory in lib/widgets/closet/type_selector.dart -
+// this is what clamps Gemini's category/type guess in /analyze-clothing, so if
+// the two lists drift apart the AI can suggest a type the app's selector doesn't show.
 const CATEGORY_TYPES = {
-  Top: ["T-Shirt", "Sweater", "Hoodie", "Blazer", "Shirt", "Cardigan", "Tank Top", "Formal Top", "Crop Top", "Vest"],
-  Bottom: ["Jeans", "Cargo Pants", "Wide Leg", "Shorts", "Skirt", "Formal Pants", "Trousers", "Joggers", "Leggings"],
+  Top: [
+    "T-Shirt", "Shirt", "Blouse", "Tank Top", "Camisole", "Crop Top",
+    "Halter Top", "Tube Top", "Off-Shoulder", "Cold-Shoulder", "Turtleneck",
+    "Polo", "Wrap Top", "Peplum Top", "Corset Top", "Bodysuit", "Sweater",
+    "Cardigan", "Hoodie", "Blazer", "Vest", "Formal Top",
+  ],
+  Bottom: [
+    "Jeans", "Skinny Jeans", "Mom Jeans", "Straight Leg", "Wide Leg",
+    "Flared", "Bootcut", "Capri", "Culottes", "Palazzo", "Cargo Pants",
+    "Joggers", "Leggings", "Trousers", "Formal Pants", "Bermuda Shorts",
+    "Shorts", "Mini Skirt", "Midi Skirt", "Maxi Skirt", "Pencil Skirt",
+    "Pleated Skirt",
+  ],
+  Dress: [
+    "Bodycon", "A-Line", "Maxi", "Midi", "Mini", "Wrap", "Slip", "Shift",
+    "Shirt Dress", "Sundress", "Flowy", "Formal/Evening Gown",
+  ],
   Shoes: ["Sneakers", "Boots", "Heels", "Sandals", "Flats", "Formal Shoes", "Loafers"],
   Bag: ["Tote", "Crossbody", "Backpack", "Clutch", "Handbag"],
   Accessory: ["Hat", "Scarf", "Belt", "Jewelry", "Sunglasses", "Watch"],
@@ -103,7 +121,8 @@ SMALL CLOSET RULE:
 If there isn't enough clothing to build a complete, sensible outfit, do NOT invent items. Instead, explain briefly what's missing and suggest what to add. Only say this if it's genuinely true.
 
 OUTFIT RULE:
-When the user wants outfit suggestions, always attempt to create exactly 3 different outfit options using only real closet items. If 3 complete outfits aren't possible, create as many real, complete outfits as you can - never pad with invented items.
+When the user wants outfit suggestions, try to create up to 3 outfit options using only real closet items - but only if they are genuinely different combinations of items. Never return the same set of items more than once with a different title or wording pretending it's a separate option - that's dishonest, not helpful.
+If the closet only realistically supports ONE distinct combination right now (e.g. there's only one usable top or one usable bottom to pick from), return just that single outfit. Don't pad to 3 by reshuffling captions - say so plainly in "reply" instead (e.g. mention this is the one real option with what they currently own, and what adding a couple more pieces would open up).
 If the requested vibe/occasion (e.g. "formal") doesn't match what's in the closet, be honest: suggest the closest available option from what they own, and clearly tell them you don't see anything truly formal in their closet yet, so they know to add more.
 
 Closet items (use ONLY these, referenced by their "id" field):
@@ -160,6 +179,19 @@ If the closet doesn't have enough items for outfits, set "outfits" to an empty a
           items: outfit.items.filter((id) => validIds.has(id)),
         }))
         .filter((outfit) => outfit.items.length > 0);
+
+      // Safety net for the OUTFIT RULE above: even with that prompt in
+      // place, the model can still relabel the same items 2-3x with
+      // different titles when the closet is too small for real variety.
+      // Collapse any outfits that use the exact same set of items down to
+      // just the first one, no matter what Gemini titled them.
+      const seenItemSets = new Set();
+      parsed.outfits = parsed.outfits.filter((outfit) => {
+        const key = [...outfit.items].sort().join(",");
+        if (seenItemSets.has(key)) return false;
+        seenItemSets.add(key);
+        return true;
+      });
     }
 
     res.json(parsed);
