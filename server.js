@@ -44,6 +44,25 @@ const CATEGORY_TYPES = {
   Accessory: ["Hat", "Scarf", "Belt", "Jewelry", "Sunglasses", "Watch"],
 };
 
+// Gemini returns a 503/"UNAVAILABLE" error when the model is overloaded -
+// this is transient and usually clears up within a few seconds, so retry
+// a couple times with a short backoff before giving up and surfacing a
+// real error to the client. Used by every generateContent call site.
+async function generateContentWithRetry(params, retries = 2) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await ai.models.generateContent(params);
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      const overloaded = message.includes("UNAVAILABLE") || message.includes("503") || message.includes("overloaded");
+      if (!overloaded || attempt === retries) throw error;
+      const delayMs = 1500 * (attempt + 1);
+      console.log(`Gemini overloaded, retrying in ${delayMs}ms (attempt ${attempt + 1}/${retries})`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 async function uploadBufferToCloudinary(buffer, filename) {
   const form = new FormData();
   form.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
@@ -156,7 +175,7 @@ If you are just chatting (not suggesting outfits yet), set "outfits" to an empty
 If the closet doesn't have enough items for outfits, set "outfits" to an empty array [] and explain in "reply".
     `;
 
-    const result = await ai.models.generateContent({
+    const result = await generateContentWithRetry({
       model: "gemini-flash-latest",
       contents: systemPrompt,
     });
@@ -263,7 +282,7 @@ ${JSON.stringify(CATEGORY_TYPES)}
 Always pick the closest valid category and type from the lists above, even if imperfect. Never invent a category or type outside them.
     `;
 
-    const result = await ai.models.generateContent({
+    const result = await generateContentWithRetry({
       model: "gemini-flash-latest",
       contents: [
         {
@@ -506,7 +525,7 @@ Return ONLY this exact JSON structure, no extra text before or after:
 }
     `;
 
-    const result = await ai.models.generateContent({
+    const result = await generateContentWithRetry({
       model: "gemini-flash-latest",
       contents: [
         {
