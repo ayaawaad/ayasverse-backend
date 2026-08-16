@@ -691,5 +691,91 @@ Return ONLY this exact JSON structure, no extra text before or after:
   }
 });
 
+// POST /generate-packing-list - "Pack for a Trip" feature.
+// body: { destination, weatherSummary, days, vibe, closetItems, boardStyleSummary?, aiName? }
+// Gemini's ONLY job is to pick real closet item ids and sort them into
+// packing categories - Flutter owns everything else (screens, checkboxes,
+// saving, showing the real images). Same closet-only enforcement pattern
+// as /chat: filter hallucinated ids out server-side, don't just trust the
+// prompt.
+app.post("/generate-packing-list", async (req, res) => {
+  console.log("Received /generate-packing-list request:", JSON.stringify(req.body).slice(0, 200));
+  try {
+    const { destination, weatherSummary, days, vibe, closetItems, boardStyleSummary, aiName } = req.body;
+
+    const assistantName = aiName && aiName.trim() ? aiName.trim() : "your AI stylist";
+
+    const packingPrompt = `
+You are ${assistantName}, the AI Stylist inside a fashion app called AyasVerse, helping the user pack for a trip.
+
+TRIP DETAILS:
+- Destination: ${destination || "not specified"}
+- Weather there: ${weatherSummary || "unknown"}
+- Length of trip: ${days || "not specified"}
+- Trip vibe: ${vibe || "not specified"}${boardStyleSummary ? `
+- Vision Board Style (chosen by the user for this trip - a text description of the AESTHETIC/MOOD/PALETTE they want to lean into, NOT a list of items they own): ${boardStyleSummary}` : ""}
+
+Closet items (use ONLY these, referenced by their "id" field - never invent one):
+${JSON.stringify(closetItems || [])}
+
+YOUR JOB:
+- Select a sensible set of real closet items for this specific trip - enough variety for the trip length without just dumping the whole closet in.
+- Match your picks to the weather (temperature, rain, etc.), the trip vibe, and the trip length.${boardStyleSummary ? " Lean toward items that fit the Vision Board Style above when the closet supports it, but never at the expense of being weather/vibe-appropriate." : ""}
+- Sort every picked item into exactly one packing category: "Tops", "Bottoms", "Shoes", "Bag", or "Extras" (Extras = outerwear/layers like jackets or cardigans, plus accessories - use your judgement on what counts as an "extra" for this trip).
+- Every single item you return MUST be a real closet item id from the list above. Do not invent clothing.
+
+WARNING RULE (important - read carefully):
+Only include a "warning" message if the closet is GENUINELY missing something needed to properly pack for THIS specific trip - e.g. a beach trip with no light/warm-weather tops, or a 7+ day trip where you can't put together more than one or two real outfits without exact repeats. If the closet is small but still lets you assemble a reasonable trip packing list, do NOT warn - a small closet on its own is not a problem. If everything's fine, set "warning" to null.
+
+Return ONLY this exact JSON structure, no extra text before or after:
+{
+  "items": [
+    { "id": "closetItemId1", "category": "Tops" }
+  ],
+  "note": "one short, warm sentence about the picks - optional, can be empty string",
+  "warning": "a short warm warning like 'You're missing a few pieces for this trip 🤎 You may want to add 1-2 more tops.' or null if nothing's missing"
+}
+    `;
+
+    const result = await generateContentWithRetry({
+      model: "gemini-flash-latest",
+      contents: packingPrompt,
+    });
+
+    const responseText = result.text;
+    const cleaned = responseText.replace(/```json|```/g, "").trim();
+
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (e) {
+      parsed = { items: [], note: responseText, warning: null };
+    }
+
+    // Hard enforcement, same pattern as every other endpoint here: strip
+    // any hallucinated closet ids and clamp category to the 5 allowed
+    // buckets instead of trusting the model followed the prompt exactly.
+    const validIds = new Set((closetItems || []).map((item) => item.id));
+    const allowedCategories = new Set(["Tops", "Bottoms", "Shoes", "Bag", "Extras"]);
+    if (Array.isArray(parsed.items)) {
+      parsed.items = parsed.items
+        .filter((entry) => entry && validIds.has(entry.id))
+        .map((entry) => ({
+          id: entry.id,
+          category: allowedCategories.has(entry.category) ? entry.category : "Extras",
+        }));
+    } else {
+      parsed.items = [];
+    }
+    if (typeof parsed.warning !== "string" || !parsed.warning.trim()) parsed.warning = null;
+    if (typeof parsed.note !== "string") parsed.note = "";
+
+    res.json(parsed);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
